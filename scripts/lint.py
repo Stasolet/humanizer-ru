@@ -133,6 +133,21 @@ def prose_sentences(lines):
     return [s.strip() for s in re.split(r"(?<=[.!?])\s+", prose) if s.strip()]
 
 
+def prose_paragraphs(lines):
+    """Абзацы прозы (заголовки, таблицы, списки, цитаты не считаются)."""
+    paras, cur = [], []
+    for l in lines:
+        if not l.strip() or re.match(r"^\s*(#|\||[-*+]\s|\d+\.\s|>)", l):
+            if cur:
+                paras.append(" ".join(cur))
+                cur = []
+            continue
+        cur.append(l.strip())
+    if cur:
+        paras.append(" ".join(cur))
+    return paras
+
+
 def verb_stems(sentence):
     stems = set()
     for w in re.findall(r"[а-яё]{5,}", sentence.lower()):
@@ -204,6 +219,30 @@ def lint(text):
         if len(lengths) >= 10 and not any(l <= 8 for l in lengths):
             findings.append(("WARN", 0, "ритм без коротких",
                              "ни одного предложения до 8 слов - нет пауз и акцентов"))
+
+    # 38 позиционный телл: абзацы под копирку (равномерные длины переживают перефраз)
+    plens = [len(p.split()) for p in prose_paragraphs(lines) if len(p.split()) >= 5]
+    if len(plens) >= 5:
+        mean = sum(plens) / len(plens)
+        cv = (sum((x - mean) ** 2 for x in plens) / len(plens)) ** 0.5 / mean
+        if cv < 0.25:
+            findings.append(("WARN", 0, "38 абзацы под копирку",
+                             f"разброс длин абзацев {cv:.0%} от средней (живой текст: 40%+)"))
+
+    # 14/38 позиционный телл: все маркированные списки ровно по три пункта
+    list_sizes, size = [], 0
+    for l in lines:
+        if re.match(r"^\s*(?:[-*+]|\d+\.)\s+\S", l):
+            size += 1
+        else:
+            if size:
+                list_sizes.append(size)
+            size = 0
+    if size:
+        list_sizes.append(size)
+    if len(list_sizes) >= 2 and all(s == 3 for s in list_sizes):
+        findings.append(("WARN", 0, "38 списки по три",
+                         f"{len(list_sizes)} списка(ов), все ровно из трёх пунктов"))
 
     # плотность жирного: максимум ~1 на 200 слов
     words_total = sum(lengths)
@@ -304,6 +343,25 @@ def self_test():
     assert any("подводка" in f[2] for f in lint(cr)), lint(cr)
     cr_ok = "Список покупок: хлеб, молоко."
     assert not [f for f in lint(cr_ok) if "подводка" in f[2]], lint(cr_ok)
+
+    # 38: абзацы под копирку - пять абзацев одной длины да, рваные нет
+    copy = "\n\n".join(
+        f"Абзац номер {i} рассказывает про одно дело десятью ровными словами." for i in range(1, 7))
+    assert any("копирку" in f[2] for f in lint(copy)), lint(copy)
+    ragged = ("Коротко о деле.\n\n"
+              "Второй абзац заметно длиннее первого и растягивает мысль на приличное "
+              "количество слов, как это делают живые авторы в постах.\n\n"
+              "Третий средний, слов на десять примерно набирается тут.\n\n"
+              "Четвёртый снова короткий совсем.\n\n"
+              "Пятый опять длинный: в нём автор разворачивает пример с деталями, "
+              "отступлениями и уточнениями, которые ломают равномерность и дают тексту дыхание.")
+    assert not [f for f in lint(ragged) if "копирку" in f[2]], lint(ragged)
+
+    # 38: все списки по три - два списка-тройки да, разнобой нет
+    lists3 = "Вступление.\n\n- один\n- два\n- три\n\nСередина.\n\n1. раз\n2. два\n3. три\n"
+    assert any("по три" in f[2] for f in lint(lists3)), lint(lists3)
+    lists_ok = "Вступление.\n\n- один\n- два\n- три\n\nСередина.\n\n- раз\n- два\n"
+    assert not [f for f in lint(lists_ok) if "по три" in f[2]], lint(lists_ok)
 
     print("self-test: OK")
 

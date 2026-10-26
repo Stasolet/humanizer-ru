@@ -57,25 +57,56 @@ ERRORS = [
 HR_LINE = re.compile(r"^\s*(-{3,}|\*{3,}|_{3,})\s*$")
 
 
-# --- 23 тире: считаем кластер, а не символ ---
-# Слепые тесты читателей выдают AI именно кластерами длинных тире (patterns.md:518).
-# Одиночное тире держит определение («кэш - память поповерхнее диска») и в технической
-# прозе норма, поэтому оно WARN. Реплики диалога и цитаты с тире в начале строки
-# не считаем вовсе - там тире единственный правильный знак.
+# --- жанр текста: строгость знака зависит от жанра, а не от вкуса редактора ---
+# public - блог, telegram, «о компании», рассылка. Любое длинное тире в прозе = ERROR,
+#          как в upstream v1.7: здесь читатель спотыкается о типографику нейроки.
+# tech   - инженерный тред: PR и коммиты, release notes, GitLab/YouTrack, RFC, доку.
+#          ERROR только на кластер (2+ в абзаце), одиночное тире = WARN: оно держит
+#          определение («кэш - память поповерхнее диска»), а кластеры выдают AI и в
+#          слепом тесте читателей (patterns.md:518).
+# В обоих жанрах строка, начинающаяся с тире, не считается: там тире - единственный
+# правильный знак прямой речи (художка, расшифровка созвона, цитата).
 DASH = re.compile(r"[—–]")
 
+# сигналы инженерного жанра; считаются по паттернам, не по вхождениям
+GENRE_TECH_SIGNALS = [
+    r"`[^`\n]{2,}`",                        # inline-код
+    r"\w+\.[a-z]{2,5}:\d+",                 # файл:строка
+    r"\B-{1,2}[a-z][a-z0-9-]{2,}\b",       # флаги CLI
+    r"\b[A-Z][A-Z0-9_]{2,}-\d+\b",         # тикеты PROJ-123
+    r"\b(p\d{2}|qps|rps|sla|api|ci|cd|grep|diff|deploy|commit|merge|pull request|"
+    r"кэш|деплой|ревью|мёрж|фолбэк|трейс|бэклог|спринт|ендпоинт|логи|тесты|схемой)\b",
+]
 
-def dash_findings(lines):
-    """ERROR на кластер (2+ тире в абзаце прозы), WARN на одиночное тире."""
+
+def tech_signals(text):
+    return [rx for rx in GENRE_TECH_SIGNALS if re.search(rx, text, re.I)]
+
+
+def detect_genre(text):
+    """Два и более сигнала - инженерный текст, иначе публицистика (дефолт строгий)."""
+    return "tech" if len(tech_signals(text)) >= 2 else "public"
+
+
+def dash_findings(lines, genre):
     out = []
     prose = [l for l in lines if not l.strip().startswith(("—", "–"))]
     for p in prose_paragraphs(prose):
-        n = len(DASH.findall(p))
-        if n >= 2:
-            out.append(("ERROR", 0, "23 кластер длинных тире", f"{n} тире в абзаце: {p[:70]}"))
-        elif n == 1:
-            out.append(("WARN", 0, "23 одиночное тире", p[:70]))
+        hits = DASH.findall(p)
+        if not hits:
+            continue
+        if genre == "tech":
+            if len(hits) >= 2:
+                out.append(("ERROR", 0, "23 кластер длинных тире",
+                            f"{len(hits)} тире в абзаце: {p[:70]}"))
+            else:
+                out.append(("WARN", 0, "23 одиночное тире", p[:70]))
+        else:
+            m = DASH.search(p)
+            out.append(("ERROR", 0, "23 длинное тире",
+                        p[max(0, m.start() - 25):m.end() + 25].strip()))
     return out
+
 
 # --- маркеры для судейского прохода (кластеры решают, не одиночные хиты) ---
 WARN_PHRASES = [
@@ -176,7 +207,7 @@ def verb_stems(sentence):
     return {s for s in stems if len(s) >= 4}
 
 
-def lint(text):
+def lint(text, genre=None):
     findings = []  # (kind, line_no, rule, excerpt)
     text = text.lstrip("﻿")  # BOM - артефакт кодировки, не текста
 
@@ -193,7 +224,7 @@ def lint(text):
 
     clean = STRIP.sub(lambda m: "\n" * m.group(0).count("\n"), text)
     lines = strip_frontmatter(clean.splitlines())
-    findings += dash_findings(lines)
+    findings += dash_findings(lines, genre or detect_genre(clean))
 
     for i, line in enumerate(lines, 1):
         if HR_LINE.match(line):
@@ -298,18 +329,24 @@ def self_test():
     bad = "Это не просто курс — это экосистема. Скорость > идеальности. Без кода. Без настроек. Итог ≈ 5+ часов, джуны vs сеньоры."
     kinds = [f[2] for f in lint(bad) if f[0] == "ERROR"]
     assert any("13" in k for k in kinds), kinds
-    assert not any("тире" in k for k in kinds), kinds  # одно тире - не ERROR
+    assert any("23 длинное тире" == k for k in kinds), kinds  # public: сток-строгость цела
     assert any("мат-знаки" in k for k in kinds), kinds
     assert any("27" in k for k in kinds), kinds
 
-    # 23 тире: кластер = ERROR, одиночное = WARN, диалог = не считаем
-    cluster = "Кэш - это память. Индекс — это указатель. Окно — это диапазон значений."
-    assert any("23 кластер длинных тире" == f[2] for f in lint(cluster) if f[0] == "ERROR"), lint(cluster)
+    # 23 тире по жанрам: в tech кластер = ERROR, одиночное = WARN; в public - как upstream
+    cluster = "Кэш — это память. Индекс — это указатель. Окно — это диапазон значений."
+    assert any("23 кластер длинных тире" == f[2] for f in lint(cluster, "tech") if f[0] == "ERROR")
     single = "Кэш — это слой, который держит горячие ключи ближе к процессу."
-    kinds_s = [f[2] for f in lint(single)]
-    assert "23 одиночное тире" in kinds_s and not [f for f in lint(single) if f[0] == "ERROR" and "тире" in f[2]], lint(single)
-    dialogue = "— Ты видел новый линтер?\n— Видел, он теперь тире кластерами считает.\n"
-    assert not [f for f in lint(dialogue) if f[0] == "ERROR" and "тире" in f[2]], lint(dialogue)
+    f_single = lint(single, "tech")
+    assert "23 одиночное тире" in [f[2] for f in f_single] and not [f for f in f_single if f[0] == "ERROR"], f_single
+    assert [f for f in lint(single, "public") if f[0] == "ERROR" and "тире" in f[2]], "public обязан остаться строгим"
+    # диалог не считается ни в одном жанре
+    dialogue = "— Ты видел новый линтер?\n— Видел, он жанры различает.\n"
+    for g in ("tech", "public"):
+        assert not [f for f in lint(dialogue, g) if f[0] == "ERROR" and "тире" in f[2]], (g, lint(dialogue, g))
+    # автоопределение: инженерный тред с кодом и тикетом, и блог без сигналов
+    assert detect_genre("Правим `cache.ts:44`, тикет CACHE-12, `--force`, П95 упал") == "tech"
+    assert detect_genre("Мы выпустили обновлённый продукт. Он работает быстрее.") == "public"
 
     ok = "Обычный текст - с коротким тире, без слопа. Цифры 12 и 87 на месте.\n> цитата\n+ пункт списка"
     assert not [f for f in lint(ok) if f[0] == "ERROR"], lint(ok)
@@ -399,9 +436,20 @@ def self_test():
 def main():
     if "--self-test" in sys.argv:
         return self_test()
-    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    argv = sys.argv[1:]
+    genre, auto = None, True
+    if "--genre" in argv:
+        i = argv.index("--genre")
+        if i + 1 >= len(argv) or argv[i + 1] not in ("tech", "public"):
+            print("нужно: --genre tech|public")
+            sys.exit(2)
+        genre, auto = argv[i + 1], False
+        argv = argv[:i] + argv[i + 2:]        # флаг и значение не файлы
+    args = [a for a in argv if not a.startswith("-")]
     text = open(args[0], encoding="utf-8").read() if args else sys.stdin.read()
-    findings = lint(text)
+    findings = lint(text, genre or detect_genre(text))
+    shown = genre or detect_genre(text)
+    print(f"жанр: {shown} ({'авто' if auto else 'явно'}; переопределить: --genre public|tech)")
     errors = [f for f in findings if f[0] == "ERROR"]
     warnings = [f for f in findings if f[0] == "WARN"]
     for kind, line_no, rule, ctx in findings:

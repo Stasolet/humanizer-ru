@@ -38,7 +38,6 @@ ZERO_WIDTH = re.compile(r"[​‌⁠﻿]|(?<!%s)‍|‍(?!%s)" % (EMOJI_CH, EMOJ
 
 # --- жёсткие запреты (номера паттернов из references/patterns.md) ---
 ERRORS = [
-    ("23 длинное тире", re.compile(r"[—–]")),
     ("23 мат-знаки", re.compile(r"(?:[≈≥≤≠±⇒←→]|\s[=><&+]\s|\d\+(?!\d)|\bvs\.?\b)")),
     # Фигура речи, а не любое «не только»: нужен второй член контраста, причём
     # непустой - «не только X, но» без продолжения это обрывок, а не паттерн.
@@ -56,6 +55,27 @@ ERRORS = [
     ("27 рубленый драматизм", re.compile(r"(?:Без|Ноль) [^.!?\n]{1,35}[.!] (?:Без|Ноль) ")),
 ]
 HR_LINE = re.compile(r"^\s*(-{3,}|\*{3,}|_{3,})\s*$")
+
+
+# --- 23 тире: считаем кластер, а не символ ---
+# Слепые тесты читателей выдают AI именно кластерами длинных тире (patterns.md:518).
+# Одиночное тире держит определение («кэш - память поповерхнее диска») и в технической
+# прозе норма, поэтому оно WARN. Реплики диалога и цитаты с тире в начале строки
+# не считаем вовсе - там тире единственный правильный знак.
+DASH = re.compile(r"[—–]")
+
+
+def dash_findings(lines):
+    """ERROR на кластер (2+ тире в абзаце прозы), WARN на одиночное тире."""
+    out = []
+    prose = [l for l in lines if not l.strip().startswith(("—", "–"))]
+    for p in prose_paragraphs(prose):
+        n = len(DASH.findall(p))
+        if n >= 2:
+            out.append(("ERROR", 0, "23 кластер длинных тире", f"{n} тире в абзаце: {p[:70]}"))
+        elif n == 1:
+            out.append(("WARN", 0, "23 одиночное тире", p[:70]))
+    return out
 
 # --- маркеры для судейского прохода (кластеры решают, не одиночные хиты) ---
 WARN_PHRASES = [
@@ -173,6 +193,7 @@ def lint(text):
 
     clean = STRIP.sub(lambda m: "\n" * m.group(0).count("\n"), text)
     lines = strip_frontmatter(clean.splitlines())
+    findings += dash_findings(lines)
 
     for i, line in enumerate(lines, 1):
         if HR_LINE.match(line):
@@ -277,9 +298,18 @@ def self_test():
     bad = "Это не просто курс — это экосистема. Скорость > идеальности. Без кода. Без настроек. Итог ≈ 5+ часов, джуны vs сеньоры."
     kinds = [f[2] for f in lint(bad) if f[0] == "ERROR"]
     assert any("13" in k for k in kinds), kinds
-    assert any("тире" in k for k in kinds), kinds
+    assert not any("тире" in k for k in kinds), kinds  # одно тире - не ERROR
     assert any("мат-знаки" in k for k in kinds), kinds
     assert any("27" in k for k in kinds), kinds
+
+    # 23 тире: кластер = ERROR, одиночное = WARN, диалог = не считаем
+    cluster = "Кэш - это память. Индекс — это указатель. Окно — это диапазон значений."
+    assert any("23 кластер длинных тире" == f[2] for f in lint(cluster) if f[0] == "ERROR"), lint(cluster)
+    single = "Кэш — это слой, который держит горячие ключи ближе к процессу."
+    kinds_s = [f[2] for f in lint(single)]
+    assert "23 одиночное тире" in kinds_s and not [f for f in lint(single) if f[0] == "ERROR" and "тире" in f[2]], lint(single)
+    dialogue = "— Ты видел новый линтер?\n— Видел, он теперь тире кластерами считает.\n"
+    assert not [f for f in lint(dialogue) if f[0] == "ERROR" and "тире" in f[2]], lint(dialogue)
 
     ok = "Обычный текст - с коротким тире, без слопа. Цифры 12 и 87 на месте.\n> цитата\n+ пункт списка"
     assert not [f for f in lint(ok) if f[0] == "ERROR"], lint(ok)

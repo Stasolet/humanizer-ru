@@ -1,4 +1,9 @@
 ![Humanizer RU](banner.webp)
+> **Это форк [smixs/humanizer-ru](https://github.com/smixs/humanizer-ru) под инженерные тексты.**
+> Отличия: тире меряется кластером, а не символом; добавлена секция «Технический жанр»;
+> описание в frontmatter влезает в лимит индекса Hermes (60 символов); два технических eval-сценария.
+> Полное обоснование и список правок - в [CHANGELOG.md](CHANGELOG.md).
+
 
 # Humanizer RU
 

@@ -60,12 +60,13 @@ HR_LINE = re.compile(r"^\s*(-{3,}|\*{3,}|_{3,})\s*$")
 # --- жанр текста: строгость знака зависит от жанра, а не от вкуса редактора ---
 # public - блог, telegram, «о компании», рассылка. Любое длинное тире в прозе = ERROR,
 #          как в upstream v1.7: здесь читатель спотыкается о типографику нейроки.
-# tech   - инженерный тред: PR и коммиты, release notes, GitLab/YouTrack, RFC, доку.
-#          ERROR только на кластер (2+ в абзаце), одиночное тире = WARN: оно держит
-#          определение («кэш - память поповерхнее диска»), а кластеры выдают AI и в
-#          слепом тесте читателей (patterns.md:518).
-# В обоих жанрах строка, начинающаяся с тире, не считается: там тире - единственный
-# правильный знак прямой речи (художка, расшифровка созвона, цитата).
+# tech   - инженерный тред: PR и коммиты, release notes, GitLab/YouTrack, RFC, доку,
+#          комментарии к коду. Любое длинное тире в прозе = ERROR (решение владельца
+#          2026-10-27 по диагнозу «сжатости» MDPO-109: тире держат на месте пропущенного
+#          союза или сказуемого, а однострочные единицы накапливаются в телеграфный
+#          стиль). Лечат раскрытием придаточного, а не заменой знака.
+# Не считаются ни в одном жанре: строка, начинающаяся с тире (прямая речь),
+# тире-плейсхолдер (в абзаце нет слов, кроме знака), числовые диапазоны 2014–2022.
 DASH = re.compile(r"[—–]")
 
 # сигналы инженерного жанра; считаются по паттернам, не по вхождениям
@@ -88,11 +89,24 @@ def detect_genre(text):
     return "tech" if len(tech_signals(text)) >= 2 else "public"
 
 
+def _dash_hits(p):
+    """Тире, которые считаются: без диапазонов чисел и тире-плейсхолдеров."""
+    if not re.search(r"[\wа-яё]", DASH.sub("", p), re.I):
+        return []  # абзац из одного знака: плейсхолдер пустого значения, не проза
+    hits = []
+    for m in DASH.finditer(p):
+        if (m.group() == "–" and 0 < m.start() < len(p) - 1
+                and p[m.start() - 1].isdigit() and p[m.start() + 1].isdigit()):
+            continue  # диапазон 2014–2022
+        hits.append(m)
+    return hits
+
+
 def dash_findings(lines, genre):
     out = []
     prose = [l for l in lines if not l.strip().startswith(("—", "–"))]
     for p in prose_paragraphs(prose):
-        hits = DASH.findall(p)
+        hits = _dash_hits(p)
         if not hits:
             continue
         if genre == "tech":
@@ -100,9 +114,11 @@ def dash_findings(lines, genre):
                 out.append(("ERROR", 0, "23 кластер длинных тире",
                             f"{len(hits)} тире в абзаце: {p[:70]}"))
             else:
-                out.append(("WARN", 0, "23 одиночное тире", p[:70]))
+                m = hits[0]
+                out.append(("ERROR", 0, "23 одиночное тире",
+                            p[max(0, m.start() - 25):m.end() + 25].strip()))
         else:
-            m = DASH.search(p)
+            m = hits[0]
             out.append(("ERROR", 0, "23 длинное тире",
                         p[max(0, m.start() - 25):m.end() + 25].strip()))
     return out
@@ -333,17 +349,22 @@ def self_test():
     assert any("мат-знаки" in k for k in kinds), kinds
     assert any("27" in k for k in kinds), kinds
 
-    # 23 тире по жанрам: в tech кластер = ERROR, одиночное = WARN; в public - как upstream
+    # 23 тире по жанрам: в tech любое = ERROR (решение владельца 27.10, «сжатость» MDPO-109);
+    # в public - как upstream; исключения жанровые: диалог, плейсхолдер, диапазон.
     cluster = "Кэш — это память. Индекс — это указатель. Окно — это диапазон значений."
     assert any("23 кластер длинных тире" == f[2] for f in lint(cluster, "tech") if f[0] == "ERROR")
     single = "Кэш — это слой, который держит горячие ключи ближе к процессу."
     f_single = lint(single, "tech")
-    assert "23 одиночное тире" in [f[2] for f in f_single] and not [f for f in f_single if f[0] == "ERROR"], f_single
+    assert any(f[0] == "ERROR" and f[2] == "23 одиночное тире" for f in f_single), f_single
     assert [f for f in lint(single, "public") if f[0] == "ERROR" and "тире" in f[2]], "public обязан остаться строгим"
     # диалог не считается ни в одном жанре
     dialogue = "— Ты видел новый линтер?\n— Видел, он жанры различает.\n"
     for g in ("tech", "public"):
         assert not [f for f in lint(dialogue, g) if f[0] == "ERROR" and "тире" in f[2]], (g, lint(dialogue, g))
+    # диапазон чисел и тире-плейсхолдер не считаются ни в одном жанре
+    for g in ("tech", "public"):
+        assert not [f for f in lint("Окно 2014–2022 закрыто полностью.\n—", g)
+                    if f[0] == "ERROR" and "тире" in f[2]], (g, lint("Окно 2014–2022 закрыто полностью.\n—", g))
     # автоопределение: инженерный тред с кодом и тикетом, и блог без сигналов
     assert detect_genre("Правим `cache.ts:44`, тикет CACHE-12, `--force`, П95 упал") == "tech"
     assert detect_genre("Мы выпустили обновлённый продукт. Он работает быстрее.") == "public"
